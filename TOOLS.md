@@ -13,7 +13,7 @@ create_workbook(filepath: str) -> str
 ```
 
 - `filepath`: Path where to create workbook
-- Returns: Success message with created file path
+- Returns: JSON string with `message`, `file_path`, `file_size_bytes`, optional `download_url`
 
 ### create_worksheet
 
@@ -26,6 +26,18 @@ create_worksheet(filepath: str, sheet_name: str) -> str
 - `filepath`: Path to Excel file
 - `sheet_name`: Name for the new worksheet
 - Returns: Success message
+
+### save_excel_file
+
+Saves/copies an existing workbook to a target path.
+
+```python
+save_excel_file(file_path: str, source_filename: str) -> str
+```
+
+- `file_path`: Target path (basename resolves to configured output directory)
+- `source_filename`: Source workbook path or basename
+- Returns: JSON string with `message`, `file_path`, `file_size_bytes`, optional `download_url`
 
 ### get_workbook_metadata
 
@@ -80,6 +92,17 @@ read_data_from_excel(
 - `end_cell`: Optional ending cell
 - `preview_only`: Whether to return only a preview
 - Returns: String representation of data
+
+### list_excel_files
+
+List `.xlsx` files in a directory.
+
+```python
+list_excel_files(directory: str = "") -> str
+```
+
+- `directory`: Directory to list; if empty or `"."`, lists configured output dir when available
+- Returns: JSON string with `directory`, `count`, and `files`
 
 ## Formatting Operations
 

@@ -82,7 +82,11 @@ uvx excel-mcp-server streamable-http
 
 ### SSE and Streamable HTTP Transports
 
-When running the server with the **SSE or Streamable HTTP protocols**, you **must set the `EXCEL_FILES_PATH` environment variable on the server side**. This variable tells the server where to read and write Excel files.
+When running the server with the **SSE or Streamable HTTP protocols**, you should set an output directory env var on the server side:
+- Primary: `DOC_OUTPUT_DIR`
+- Backward-compatible fallbacks: `EXCEL_FILES_PATH`, then `MCP_OUTPUT_DIR`
+
+The resolved directory is used for reading/writing generated Excel files.
 - If not set, it defaults to `./excel_files`.
 
 You can also set the `FASTMCP_PORT` environment variable to control the port the server listens on (default is `8017` if not set).
@@ -90,24 +94,29 @@ Optionally, in **streamable HTTP mode**, you can protect all HTTP endpoints (`/m
 - `EXCEL_MCP_API_KEY`: Required API key value.
 - `EXCEL_MCP_API_KEY_HEADER`: Header name to read (default: `x-api-key`).
 
+Optional download URL env vars used in tool responses:
+- `DOC_DOWNLOAD_BASE_URL` (primary)
+- `MCP_DOWNLOAD_BASE_URL` (fallback)
+
 - Example (Windows PowerShell):
   ```powershell
-  $env:EXCEL_FILES_PATH="E:\MyExcelFiles"
+  $env:DOC_OUTPUT_DIR="E:\MyExcelFiles"
   $env:FASTMCP_PORT="8007"
   $env:EXCEL_MCP_API_KEY="replace-with-secret"
+  $env:DOC_DOWNLOAD_BASE_URL="https://your-server-domain"
   uvx excel-mcp-server streamable-http
   ```
 - Example (Linux/macOS):
   ```bash
-  EXCEL_FILES_PATH=/path/to/excel_files FASTMCP_PORT=8007 EXCEL_MCP_API_KEY=replace-with-secret uvx excel-mcp-server streamable-http
+  DOC_OUTPUT_DIR=/path/to/excel_files FASTMCP_PORT=8007 EXCEL_MCP_API_KEY=replace-with-secret DOC_DOWNLOAD_BASE_URL=https://your-server-domain uvx excel-mcp-server streamable-http
   ```
 
 ### HTTP File Endpoints (SSE and Streamable HTTP)
 
 When using SSE or Streamable HTTP, the server now exposes:
 
-- `GET /files` - list files currently available under `EXCEL_FILES_PATH`
-- `GET /files/{relative_path}` - download a specific file (for example: `/files/report.xlsx`)
+- `GET /files` - list files currently available under the resolved output directory
+- `GET /files/{filename}` - download a specific `.xlsx` file by basename (for example: `/files/report.xlsx`)
 - `GET /healthz` - simple health check endpoint (always public)
 
 Example:
@@ -134,6 +143,16 @@ mcpServers:
     headers:
       x-api-key: "${EXCEL_MCP_API_KEY}"
 ```
+
+### Save and Listing Tools
+
+- `save_excel_file(file_path, source_filename)` copies/saves an existing workbook and returns:
+  - `message`
+  - `file_path`
+  - `file_size_bytes`
+  - optional `download_url`
+- `list_excel_files(directory="")` lists `.xlsx` files.
+  - If directory is empty or `"."` and output dir is configured, it lists the configured output dir.
 
 ### Stdio Transport
 

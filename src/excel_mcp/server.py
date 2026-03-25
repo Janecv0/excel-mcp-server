@@ -2,9 +2,11 @@ import logging
 import mimetypes
 import os
 import secrets
+import shutil
+import json
 from pathlib import Path
 from typing import Any, List, Dict, Optional
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -81,6 +83,10 @@ mcp = FastMCP(
 
 API_KEY_ENV_VAR = "EXCEL_MCP_API_KEY"
 API_KEY_HEADER_ENV_VAR = "EXCEL_MCP_API_KEY_HEADER"
+OUTPUT_DIR_PRIMARY_ENV_VAR = "DOC_OUTPUT_DIR"
+OUTPUT_DIR_COMPAT_ENV_VAR = "MCP_OUTPUT_DIR"
+DOWNLOAD_BASE_URL_PRIMARY_ENV_VAR = "DOC_DOWNLOAD_BASE_URL"
+DOWNLOAD_BASE_URL_COMPAT_ENV_VAR = "MCP_DOWNLOAD_BASE_URL"
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
     """Simple API key middleware for HTTP transports."""
@@ -118,26 +124,160 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
 
         return await call_next(request)
 
-def get_excel_path(filename: str) -> str:
-    """Get full path to Excel file.
-    
-    Args:
-        filename: Name of Excel file
-        
-    Returns:
-        Full path to Excel file
+def _clean_user_path(raw_path: Optional[str]) -> str:
+    """Trim whitespace and wrapping quotes from user-provided paths."""
+    value = (raw_path or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1].strip()
+    return value
+
+def _is_basename_only(path_value: str) -> bool:
+    path_obj = Path(path_value)
+    return not path_obj.is_absolute() and path_obj.parent == Path(".")
+
+def resolve_output_dir(default_if_missing: Optional[str] = None) -> Optional[str]:
     """
-    # If filename is already an absolute path, return it
-    if os.path.isabs(filename):
-        return filename
+    Resolve output directory with compatibility fallbacks.
 
-    # Check if in SSE mode (EXCEL_FILES_PATH is not None)
-    if EXCEL_FILES_PATH is None:
-        # Must use absolute path
-        raise ValueError(f"Invalid filename: {filename}, must be an absolute path when not in SSE mode")
+    Priority:
+      1) DOC_OUTPUT_DIR
+      2) EXCEL_FILES_PATH
+      3) MCP_OUTPUT_DIR
+      4) default_if_missing
+    """
+    configured = (
+        os.environ.get(OUTPUT_DIR_PRIMARY_ENV_VAR)
+        or os.environ.get("EXCEL_FILES_PATH")
+        or os.environ.get(OUTPUT_DIR_COMPAT_ENV_VAR)
+        or default_if_missing
+    )
+    if not configured:
+        return None
 
-    # In SSE mode, if it's a relative path, resolve it based on EXCEL_FILES_PATH
-    return os.path.join(EXCEL_FILES_PATH, filename)
+    resolved = str(Path(configured).expanduser().resolve())
+    # Keep env vars synchronized for cross-server compatibility.
+    os.environ[OUTPUT_DIR_PRIMARY_ENV_VAR] = resolved
+    os.environ["EXCEL_FILES_PATH"] = resolved
+    return resolved
+
+def ensure_excel_extension(file_path: str) -> str:
+    """
+    Normalize filename and ensure .xlsx extension.
+
+    - trims whitespace and wrapping quotes
+    - defaults empty to workbook.xlsx
+    - enforces .xlsx extension (case-insensitive)
+    - resolves basename-only paths to output dir when configured
+    """
+    normalized = _clean_user_path(file_path)
+    if not normalized:
+        normalized = "workbook.xlsx"
+
+    if not normalized.lower().endswith(".xlsx"):
+        normalized = f"{normalized}.xlsx"
+
+    files_root = get_files_root()
+    if files_root and _is_basename_only(normalized):
+        return str(files_root / normalized)
+    return normalized
+
+def _checked_paths_error(file_ref: str, checked_paths: list[Path]) -> FileNotFoundError:
+    checked = ", ".join(str(path) for path in checked_paths)
+    return FileNotFoundError(f"Excel file '{file_ref}' not found. Checked: {checked}")
+
+def resolve_existing_excel_path(file_ref: str) -> Path:
+    """Resolve an existing workbook path with basename/case-insensitive fallbacks."""
+    cleaned = _clean_user_path(file_ref)
+    if not cleaned:
+        raise FileNotFoundError("Excel file path cannot be empty.")
+
+    if not cleaned.lower().endswith(".xlsx"):
+        cleaned = f"{cleaned}.xlsx"
+
+    requested_path = Path(cleaned)
+    checked_paths: list[Path] = []
+
+    # 1) exact path (absolute or cwd-relative)
+    exact_candidate = requested_path if requested_path.is_absolute() else requested_path.resolve()
+    checked_paths.append(exact_candidate)
+    if exact_candidate.exists() and exact_candidate.is_file():
+        return exact_candidate.resolve()
+
+    files_root = get_files_root()
+    if files_root:
+        # 2) output-dir fallback for relative paths
+        if not requested_path.is_absolute():
+            output_candidate = (files_root / requested_path).resolve()
+            checked_paths.append(output_candidate)
+            if output_candidate.exists() and output_candidate.is_file():
+                return output_candidate
+
+        # 3) basename fallback in output dir
+        basename = requested_path.name
+        basename_candidate = (files_root / basename).resolve()
+        checked_paths.append(basename_candidate)
+        if basename_candidate.exists() and basename_candidate.is_file():
+            return basename_candidate
+
+        # 4) case-insensitive basename fallback
+        lower_basename = basename.lower()
+        for candidate in files_root.rglob("*"):
+            if candidate.is_file() and candidate.name.lower() == lower_basename:
+                return candidate.resolve()
+
+    raise _checked_paths_error(file_ref, checked_paths)
+
+def _validate_writable_target(target_path: Path) -> None:
+    """Validate target write access before save/copy operations."""
+    if target_path.exists():
+        if not os.access(target_path, os.W_OK):
+            raise PermissionError(f"Target file is not writable: {target_path}")
+        return
+
+    parent = target_path.parent
+    if not parent.exists():
+        parent.mkdir(parents=True, exist_ok=True)
+    if not os.access(parent, os.W_OK):
+        raise PermissionError(f"Target directory is not writable: {parent}")
+
+def resolve_target_excel_path(target_ref: str) -> Path:
+    """Resolve target save path, using output dir when given basename only."""
+    normalized = ensure_excel_extension(target_ref)
+    target_path = Path(normalized)
+    if not target_path.is_absolute():
+        target_path = target_path.resolve()
+
+    _validate_writable_target(target_path)
+    return target_path
+
+def get_download_base_url() -> Optional[str]:
+    base_url = (
+        os.environ.get(DOWNLOAD_BASE_URL_PRIMARY_ENV_VAR)
+        or os.environ.get(DOWNLOAD_BASE_URL_COMPAT_ENV_VAR)
+        or os.environ.get("EXCEL_DOWNLOAD_BASE_URL")
+    )
+    if not base_url:
+        return None
+    return base_url.strip().rstrip("/")
+
+def build_download_url(file_path: Path) -> Optional[str]:
+    """Build download URL when a base URL is configured."""
+    base_url = get_download_base_url()
+    if not base_url:
+        return None
+
+    return f"{base_url}/files/{quote(file_path.name)}"
+
+def get_excel_path(filename: str, must_exist: bool = True) -> str:
+    """
+    Get normalized workbook path.
+
+    For existing files, applies exact/output-dir/case-insensitive fallback logic.
+    For new files, resolves basename-only targets into output dir.
+    """
+    if must_exist:
+        return str(resolve_existing_excel_path(filename))
+    return str(resolve_target_excel_path(filename))
 
 def get_files_root() -> Optional[Path]:
     """Return the resolved files root path for HTTP file routes."""
@@ -146,21 +286,26 @@ def get_files_root() -> Optional[Path]:
     return Path(EXCEL_FILES_PATH).resolve()
 
 def resolve_download_path(raw_file_path: str) -> Path:
-    """Resolve a user-provided relative file path under EXCEL_FILES_PATH safely."""
+    """
+    Resolve basename-only .xlsx download path under EXCEL_FILES_PATH.
+
+    Invalid names intentionally map to a 404 response.
+    """
     files_root = get_files_root()
     if files_root is None:
-        raise ValueError(
-            "File endpoints are unavailable because EXCEL_FILES_PATH is not configured."
-        )
+        raise FileNotFoundError("File not found.")
 
-    if not raw_file_path or raw_file_path.strip() == "":
-        raise ValueError("A file path is required.")
+    filename = _clean_user_path(unquote(raw_file_path))
+    if not filename:
+        raise FileNotFoundError("File not found.")
+    if Path(filename).name != filename:
+        raise FileNotFoundError("File not found.")
+    if not filename.lower().endswith(".xlsx"):
+        raise FileNotFoundError("File not found.")
 
-    requested_path = (files_root / unquote(raw_file_path)).resolve()
-    try:
-        requested_path.relative_to(files_root)
-    except ValueError as exc:
-        raise ValueError("Invalid file path.") from exc
+    requested_path = (files_root / filename).resolve()
+    if requested_path.parent != files_root:
+        raise FileNotFoundError("File not found.")
     return requested_path
 
 @mcp.custom_route("/files", methods=["GET"])
@@ -181,14 +326,20 @@ async def list_generated_files(_: Request) -> Response:
         return JSONResponse({"files_root": str(files_root), "count": 0, "files": []})
 
     files = []
-    for path in sorted(files_root.rglob("*")):
-        if path.is_file():
-            rel_path = path.relative_to(files_root).as_posix()
+    for path in sorted(files_root.glob("*.xlsx")):
+        if path.is_file() and path.suffix.lower() == ".xlsx":
+            rel_path = path.name
+            item = {
+                "path": rel_path,
+                "name": path.name,
+                "size_bytes": path.stat().st_size,
+            }
+            download_url = build_download_url(path)
+            if download_url:
+                item["download_url"] = download_url
             files.append(
                 {
-                    "path": rel_path,
-                    "name": path.name,
-                    "size_bytes": path.stat().st_size,
+                    **item
                 }
             )
 
@@ -201,13 +352,12 @@ async def download_generated_file(request: Request) -> Response:
 
     Example:
       GET /files/report.xlsx
-      GET /files/subfolder/report.xlsx
     """
     raw_file_path = request.path_params.get("file_path", "")
     try:
         file_path = resolve_download_path(raw_file_path)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+    except FileNotFoundError:
+        return JSONResponse({"error": "File not found."}, status_code=404)
 
     if not file_path.exists() or not file_path.is_file():
         return JSONResponse({"error": "File not found."}, status_code=404)
@@ -379,11 +529,66 @@ def read_data_from_excel(
             return "No data found in specified range"
             
         # Return as formatted JSON string
-        import json
         return json.dumps(result, indent=2, default=str)
         
     except Exception as e:
         logger.error(f"Error reading data: {e}")
+        raise
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List Excel Files",
+        readOnlyHint=True,
+    ),
+)
+def list_excel_files(directory: str = "") -> str:
+    """
+    List .xlsx files in a directory.
+
+    If directory is empty or ".", and an output dir is configured, lists output dir.
+    """
+    try:
+        files_root = get_files_root()
+        requested_dir = _clean_user_path(directory)
+
+        if (requested_dir == "" or requested_dir == ".") and files_root:
+            target_dir = files_root
+        elif requested_dir == "" or requested_dir == ".":
+            target_dir = Path(".").resolve()
+        else:
+            requested_path = Path(requested_dir)
+            if requested_path.is_absolute():
+                target_dir = requested_path.resolve()
+            elif files_root:
+                target_dir = (files_root / requested_path).resolve()
+            else:
+                target_dir = requested_path.resolve()
+
+        if not target_dir.exists() or not target_dir.is_dir():
+            return f"Error: Directory not found: {target_dir}"
+
+        files: list[dict[str, Any]] = []
+        for candidate in sorted(target_dir.glob("*.xlsx")):
+            if not candidate.is_file():
+                continue
+            item: dict[str, Any] = {
+                "name": candidate.name,
+                "path": str(candidate.resolve()),
+                "size_bytes": candidate.stat().st_size,
+            }
+            download_url = build_download_url(candidate)
+            if download_url:
+                item["download_url"] = download_url
+            files.append(item)
+
+        payload = {
+            "directory": str(target_dir),
+            "count": len(files),
+            "files": files,
+        }
+        return json.dumps(payload, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing Excel files: {e}")
         raise
 
 @mcp.tool(
@@ -428,14 +633,70 @@ def write_data_to_excel(
 def create_workbook(filepath: str) -> str:
     """Create new Excel workbook."""
     try:
-        full_path = get_excel_path(filepath)
+        full_path = get_excel_path(filepath, must_exist=False)
         from excel_mcp.workbook import create_workbook as create_workbook_impl
         create_workbook_impl(full_path)
-        return f"Created workbook at {full_path}"
+        created_path = Path(full_path).resolve()
+        response_payload: Dict[str, Any] = {
+            "message": "Workbook created successfully.",
+            "file_path": str(created_path),
+            "file_size_bytes": created_path.stat().st_size if created_path.exists() else 0,
+        }
+        download_url = build_download_url(created_path)
+        if download_url:
+            response_payload["download_url"] = download_url
+        return json.dumps(response_payload, indent=2)
     except WorkbookError as e:
         return f"Error: {str(e)}"
     except Exception as e:
         logger.error(f"Error creating workbook: {e}")
+        raise
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Save Excel File",
+        destructiveHint=True,
+    ),
+)
+def save_excel_file(file_path: str, source_filename: str) -> str:
+    """
+    Save/copy an existing workbook to a target path.
+
+    The source file is resolved using robust lookup:
+    exact path, output-dir fallback, and case-insensitive basename fallback.
+    """
+    try:
+        source_path = resolve_existing_excel_path(source_filename)
+        target_path = resolve_target_excel_path(file_path)
+
+        if source_path.resolve() == target_path.resolve():
+            payload: Dict[str, Any] = {
+                "message": "No-op: source and target paths are the same.",
+                "file_path": str(target_path),
+                "file_size_bytes": target_path.stat().st_size if target_path.exists() else 0,
+            }
+            download_url = build_download_url(target_path)
+            if download_url:
+                payload["download_url"] = download_url
+            return json.dumps(payload, indent=2)
+
+        shutil.copy2(source_path, target_path)
+        if not target_path.exists():
+            raise WorkbookError(f"Saved file was not found after copy: {target_path}")
+
+        payload = {
+            "message": "Workbook saved successfully.",
+            "file_path": str(target_path),
+            "file_size_bytes": target_path.stat().st_size,
+        }
+        download_url = build_download_url(target_path)
+        if download_url:
+            payload["download_url"] = download_url
+        return json.dumps(payload, indent=2)
+    except (FileNotFoundError, PermissionError, WorkbookError) as e:
+        return f"Error: {str(e)}"
+    except Exception as e:
+        logger.error(f"Error saving workbook: {e}")
         raise
 
 @mcp.tool(
@@ -927,10 +1188,10 @@ def delete_sheet_columns(
 
 def run_sse():
     """Run Excel MCP server in SSE mode."""
-    # Assign value to EXCEL_FILES_PATH in SSE mode
     global EXCEL_FILES_PATH
-    EXCEL_FILES_PATH = os.environ.get("EXCEL_FILES_PATH", "./excel_files")
-    # Create directory if it doesn't exist
+    EXCEL_FILES_PATH = resolve_output_dir(default_if_missing="./excel_files")
+    if EXCEL_FILES_PATH is None:
+        raise RuntimeError("Failed to resolve output directory for SSE transport.")
     os.makedirs(EXCEL_FILES_PATH, exist_ok=True)
     
     try:
@@ -946,14 +1207,14 @@ def run_sse():
 
 def run_streamable_http():
     """Run Excel MCP server in streamable HTTP mode."""
-    # Assign value to EXCEL_FILES_PATH in streamable HTTP mode
     global EXCEL_FILES_PATH
-    EXCEL_FILES_PATH = os.environ.get("EXCEL_FILES_PATH", "./excel_files")
+    EXCEL_FILES_PATH = resolve_output_dir(default_if_missing="./excel_files")
+    if EXCEL_FILES_PATH is None:
+        raise RuntimeError("Failed to resolve output directory for streamable HTTP transport.")
     api_key = os.environ.get(API_KEY_ENV_VAR, "").strip()
     api_key_header = os.environ.get(API_KEY_HEADER_ENV_VAR, "x-api-key").strip() or "x-api-key"
     host = os.environ.get("FASTMCP_HOST", "0.0.0.0")
     port = int(os.environ.get("FASTMCP_PORT", "8017"))
-    # Create directory if it doesn't exist
     os.makedirs(EXCEL_FILES_PATH, exist_ok=True)
     
     try:
@@ -984,7 +1245,11 @@ def run_streamable_http():
 
 def run_stdio():
     """Run Excel MCP server in stdio mode."""
-    # No need to assign EXCEL_FILES_PATH in stdio mode
+    global EXCEL_FILES_PATH
+    # Keep stdio backward-compatible: only use output dir if explicitly configured.
+    EXCEL_FILES_PATH = resolve_output_dir(default_if_missing=None)
+    if EXCEL_FILES_PATH:
+        os.makedirs(EXCEL_FILES_PATH, exist_ok=True)
     
     try:
         logger.info("Starting Excel MCP server with stdio transport")

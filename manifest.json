@@ -25,8 +25,10 @@
   },
   "tools": [
     {"name": "create_workbook", "description": "Create a new Excel workbook"},
+    {"name": "save_excel_file", "description": "Save/copy an existing workbook to a target path"},
     {"name": "create_worksheet", "description": "Create a new worksheet in a workbook"},
     {"name": "get_workbook_metadata", "description": "Get workbook metadata and structure"},
+    {"name": "list_excel_files", "description": "List available .xlsx files"},
     {"name": "write_data_to_excel", "description": "Write data to Excel cells"},
     {"name": "read_data_from_excel", "description": "Read data from Excel range"},
     {"name": "format_range", "description": "Apply formatting to cell range"},
