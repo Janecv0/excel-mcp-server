@@ -1,9 +1,16 @@
 import logging
+import mimetypes
 import os
+import secrets
+from pathlib import Path
 from typing import Any, List, Dict, Optional
+from urllib.parse import unquote
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import FileResponse, JSONResponse, Response
 
 # Import exceptions
 from excel_mcp.exceptions import (
@@ -72,6 +79,45 @@ mcp = FastMCP(
     instructions="Excel MCP Server for manipulating Excel files"
 )
 
+API_KEY_ENV_VAR = "EXCEL_MCP_API_KEY"
+API_KEY_HEADER_ENV_VAR = "EXCEL_MCP_API_KEY_HEADER"
+
+class APIKeyMiddleware(BaseHTTPMiddleware):
+    """Simple API key middleware for HTTP transports."""
+
+    def __init__(
+        self,
+        app: Any,
+        api_key: str,
+        header_name: str = "x-api-key",
+        exempt_paths: Optional[List[str]] = None,
+    ):
+        super().__init__(app)
+        self.api_key = api_key
+        self.header_name = header_name.lower()
+        self.exempt_paths = exempt_paths or []
+
+    async def dispatch(self, request: Request, call_next: Any) -> Response:
+        request_path = request.url.path
+        if request.method.upper() == "OPTIONS":
+            return await call_next(request)
+
+        for exempt in self.exempt_paths:
+            if request_path == exempt or request_path.startswith(f"{exempt.rstrip('/')}/"):
+                return await call_next(request)
+
+        provided_key = request.headers.get(self.header_name)
+        if not provided_key:
+            return JSONResponse(
+                {"error": f"Missing API key header: {self.header_name}"},
+                status_code=401,
+            )
+
+        if not secrets.compare_digest(provided_key, self.api_key):
+            return JSONResponse({"error": "Invalid API key."}, status_code=403)
+
+        return await call_next(request)
+
 def get_excel_path(filename: str) -> str:
     """Get full path to Excel file.
     
@@ -92,6 +138,91 @@ def get_excel_path(filename: str) -> str:
 
     # In SSE mode, if it's a relative path, resolve it based on EXCEL_FILES_PATH
     return os.path.join(EXCEL_FILES_PATH, filename)
+
+def get_files_root() -> Optional[Path]:
+    """Return the resolved files root path for HTTP file routes."""
+    if EXCEL_FILES_PATH is None:
+        return None
+    return Path(EXCEL_FILES_PATH).resolve()
+
+def resolve_download_path(raw_file_path: str) -> Path:
+    """Resolve a user-provided relative file path under EXCEL_FILES_PATH safely."""
+    files_root = get_files_root()
+    if files_root is None:
+        raise ValueError(
+            "File endpoints are unavailable because EXCEL_FILES_PATH is not configured."
+        )
+
+    if not raw_file_path or raw_file_path.strip() == "":
+        raise ValueError("A file path is required.")
+
+    requested_path = (files_root / unquote(raw_file_path)).resolve()
+    try:
+        requested_path.relative_to(files_root)
+    except ValueError as exc:
+        raise ValueError("Invalid file path.") from exc
+    return requested_path
+
+@mcp.custom_route("/files", methods=["GET"])
+async def list_generated_files(_: Request) -> Response:
+    """
+    List files currently available under EXCEL_FILES_PATH.
+
+    This route is available in SSE and streamable HTTP transports.
+    """
+    files_root = get_files_root()
+    if files_root is None:
+        return JSONResponse(
+            {"error": "EXCEL_FILES_PATH is not configured for this transport."},
+            status_code=400,
+        )
+
+    if not files_root.exists():
+        return JSONResponse({"files_root": str(files_root), "count": 0, "files": []})
+
+    files = []
+    for path in sorted(files_root.rglob("*")):
+        if path.is_file():
+            rel_path = path.relative_to(files_root).as_posix()
+            files.append(
+                {
+                    "path": rel_path,
+                    "name": path.name,
+                    "size_bytes": path.stat().st_size,
+                }
+            )
+
+    return JSONResponse({"files_root": str(files_root), "count": len(files), "files": files})
+
+@mcp.custom_route("/files/{file_path:path}", methods=["GET"])
+async def download_generated_file(request: Request) -> Response:
+    """
+    Download a file from EXCEL_FILES_PATH by relative path.
+
+    Example:
+      GET /files/report.xlsx
+      GET /files/subfolder/report.xlsx
+    """
+    raw_file_path = request.path_params.get("file_path", "")
+    try:
+        file_path = resolve_download_path(raw_file_path)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    if not file_path.exists() or not file_path.is_file():
+        return JSONResponse({"error": "File not found."}, status_code=404)
+
+    media_type, _ = mimetypes.guess_type(str(file_path))
+    return FileResponse(
+        path=str(file_path),
+        media_type=media_type or "application/octet-stream",
+        filename=file_path.name,
+    )
+
+@mcp.custom_route("/healthz", methods=["GET"])
+async def healthz(_: Request) -> Response:
+    """Unauthenticated healthcheck endpoint for load balancers."""
+    return JSONResponse({"status": "ok"})
 
 @mcp.tool(
     annotations=ToolAnnotations(
@@ -818,12 +949,31 @@ def run_streamable_http():
     # Assign value to EXCEL_FILES_PATH in streamable HTTP mode
     global EXCEL_FILES_PATH
     EXCEL_FILES_PATH = os.environ.get("EXCEL_FILES_PATH", "./excel_files")
+    api_key = os.environ.get(API_KEY_ENV_VAR, "").strip()
+    api_key_header = os.environ.get(API_KEY_HEADER_ENV_VAR, "x-api-key").strip() or "x-api-key"
+    host = os.environ.get("FASTMCP_HOST", "0.0.0.0")
+    port = int(os.environ.get("FASTMCP_PORT", "8017"))
     # Create directory if it doesn't exist
     os.makedirs(EXCEL_FILES_PATH, exist_ok=True)
     
     try:
         logger.info(f"Starting Excel MCP server with streamable HTTP transport (files directory: {EXCEL_FILES_PATH})")
-        mcp.run(transport="streamable-http")
+        if api_key:
+            # When API key auth is enabled, run the ASGI app with middleware
+            # so both /mcp and custom routes (/files, /healthz) are protected.
+            import uvicorn
+
+            app = mcp.streamable_http_app()
+            app.add_middleware(
+                APIKeyMiddleware,
+                api_key=api_key,
+                header_name=api_key_header,
+                exempt_paths=["/healthz"],
+            )
+            logger.info(f"API key auth enabled for HTTP endpoints via header '{api_key_header}'")
+            uvicorn.run(app, host=host, port=port)
+        else:
+            mcp.run(transport="streamable-http")
     except KeyboardInterrupt:
         logger.info("Server stopped by user")
     except Exception as e:

@@ -86,16 +86,54 @@ When running the server with the **SSE or Streamable HTTP protocols**, you **mus
 - If not set, it defaults to `./excel_files`.
 
 You can also set the `FASTMCP_PORT` environment variable to control the port the server listens on (default is `8017` if not set).
+Optionally, in **streamable HTTP mode**, you can protect all HTTP endpoints (`/mcp` and `/files`) with an API key:
+- `EXCEL_MCP_API_KEY`: Required API key value.
+- `EXCEL_MCP_API_KEY_HEADER`: Header name to read (default: `x-api-key`).
+
 - Example (Windows PowerShell):
   ```powershell
   $env:EXCEL_FILES_PATH="E:\MyExcelFiles"
   $env:FASTMCP_PORT="8007"
+  $env:EXCEL_MCP_API_KEY="replace-with-secret"
   uvx excel-mcp-server streamable-http
   ```
 - Example (Linux/macOS):
   ```bash
-  EXCEL_FILES_PATH=/path/to/excel_files FASTMCP_PORT=8007 uvx excel-mcp-server streamable-http
+  EXCEL_FILES_PATH=/path/to/excel_files FASTMCP_PORT=8007 EXCEL_MCP_API_KEY=replace-with-secret uvx excel-mcp-server streamable-http
   ```
+
+### HTTP File Endpoints (SSE and Streamable HTTP)
+
+When using SSE or Streamable HTTP, the server now exposes:
+
+- `GET /files` - list files currently available under `EXCEL_FILES_PATH`
+- `GET /files/{relative_path}` - download a specific file (for example: `/files/report.xlsx`)
+- `GET /healthz` - simple health check endpoint (always public)
+
+Example:
+
+```bash
+curl -s https://your-server-domain/files
+curl -L -o report.xlsx https://your-server-domain/files/report.xlsx
+```
+
+If `EXCEL_MCP_API_KEY` is set, include the key header:
+
+```bash
+curl -s -H "x-api-key: replace-with-secret" https://your-server-domain/files
+curl -L -H "x-api-key: replace-with-secret" -o report.xlsx https://your-server-domain/files/report.xlsx
+```
+
+LibreChat streamable-http example with API key:
+
+```yaml
+mcpServers:
+  excel:
+    type: streamable-http
+    url: https://your-server-domain/mcp
+    headers:
+      x-api-key: "${EXCEL_MCP_API_KEY}"
+```
 
 ### Stdio Transport
 
