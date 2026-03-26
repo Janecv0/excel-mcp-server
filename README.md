@@ -97,6 +97,9 @@ Optionally, in **streamable HTTP mode**, you can protect all HTTP endpoints (`/m
 Optional download URL env vars used in tool responses:
 - `DOC_DOWNLOAD_BASE_URL` (primary)
 - `MCP_DOWNLOAD_BASE_URL` (fallback)
+- `DOC_DOWNLOAD_SIGNING_SECRET` (primary, enables signed clickable links)
+- `MCP_DOWNLOAD_SIGNING_SECRET` (fallback)
+- `DOC_DOWNLOAD_URL_TTL_SECONDS` (optional, default `300`)
 
 - Example (Windows PowerShell):
   ```powershell
@@ -104,11 +107,12 @@ Optional download URL env vars used in tool responses:
   $env:FASTMCP_PORT="8007"
   $env:EXCEL_MCP_API_KEY="replace-with-secret"
   $env:DOC_DOWNLOAD_BASE_URL="https://your-server-domain"
+  $env:DOC_DOWNLOAD_SIGNING_SECRET="replace-with-strong-secret"
   uvx excel-mcp-server streamable-http
   ```
 - Example (Linux/macOS):
   ```bash
-  DOC_OUTPUT_DIR=/path/to/excel_files FASTMCP_PORT=8007 EXCEL_MCP_API_KEY=replace-with-secret DOC_DOWNLOAD_BASE_URL=https://your-server-domain uvx excel-mcp-server streamable-http
+  DOC_OUTPUT_DIR=/path/to/excel_files FASTMCP_PORT=8007 EXCEL_MCP_API_KEY=replace-with-secret DOC_DOWNLOAD_BASE_URL=https://your-server-domain DOC_DOWNLOAD_SIGNING_SECRET=replace-with-strong-secret uvx excel-mcp-server streamable-http
   ```
 
 ### HTTP File Endpoints (SSE and Streamable HTTP)
@@ -132,6 +136,9 @@ If `EXCEL_MCP_API_KEY` is set, include the key header:
 curl -s -H "x-api-key: replace-with-secret" https://your-server-domain/files
 curl -L -H "x-api-key: replace-with-secret" -o report.xlsx https://your-server-domain/files/report.xlsx
 ```
+
+If `DOC_DOWNLOAD_SIGNING_SECRET` is set, tool responses return short-lived signed `download_url` links.
+Those links are browser-clickable without manually adding headers, while keeping normal file access private.
 
 LibreChat streamable-http example with API key:
 

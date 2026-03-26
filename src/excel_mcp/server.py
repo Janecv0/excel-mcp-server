@@ -4,6 +4,9 @@ import os
 import secrets
 import shutil
 import json
+import hmac
+import hashlib
+import time
 from pathlib import Path
 from typing import Any, List, Dict, Optional
 from urllib.parse import quote, unquote
@@ -87,6 +90,10 @@ OUTPUT_DIR_PRIMARY_ENV_VAR = "DOC_OUTPUT_DIR"
 OUTPUT_DIR_COMPAT_ENV_VAR = "MCP_OUTPUT_DIR"
 DOWNLOAD_BASE_URL_PRIMARY_ENV_VAR = "DOC_DOWNLOAD_BASE_URL"
 DOWNLOAD_BASE_URL_COMPAT_ENV_VAR = "MCP_DOWNLOAD_BASE_URL"
+DOWNLOAD_SIGNING_SECRET_PRIMARY_ENV_VAR = "DOC_DOWNLOAD_SIGNING_SECRET"
+DOWNLOAD_SIGNING_SECRET_COMPAT_ENV_VAR = "MCP_DOWNLOAD_SIGNING_SECRET"
+DOWNLOAD_URL_TTL_PRIMARY_ENV_VAR = "DOC_DOWNLOAD_URL_TTL_SECONDS"
+DOWNLOAD_URL_TTL_COMPAT_ENV_VAR = "MCP_DOWNLOAD_URL_TTL_SECONDS"
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
     """Simple API key middleware for HTTP transports."""
@@ -107,6 +114,16 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         request_path = request.url.path
         if request.method.upper() == "OPTIONS":
             return await call_next(request)
+
+        if request_path.startswith("/files/"):
+            signed_status = evaluate_signed_download_request(request)
+            if signed_status == "valid":
+                return await call_next(request)
+            if signed_status == "invalid":
+                return JSONResponse(
+                    {"error": "Invalid or expired download signature."},
+                    status_code=403,
+                )
 
         for exempt in self.exempt_paths:
             if request_path == exempt or request_path.startswith(f"{exempt.rstrip('/')}/"):
@@ -260,13 +277,100 @@ def get_download_base_url() -> Optional[str]:
         return None
     return base_url.strip().rstrip("/")
 
+def get_download_signing_secret() -> Optional[str]:
+    secret = (
+        os.environ.get(DOWNLOAD_SIGNING_SECRET_PRIMARY_ENV_VAR)
+        or os.environ.get(DOWNLOAD_SIGNING_SECRET_COMPAT_ENV_VAR)
+        or os.environ.get("EXCEL_DOWNLOAD_SIGNING_SECRET")
+    )
+    if not secret:
+        return None
+    return secret.strip()
+
+def get_download_url_ttl_seconds() -> int:
+    raw_value = (
+        os.environ.get(DOWNLOAD_URL_TTL_PRIMARY_ENV_VAR)
+        or os.environ.get(DOWNLOAD_URL_TTL_COMPAT_ENV_VAR)
+        or os.environ.get("EXCEL_DOWNLOAD_URL_TTL_SECONDS")
+        or "300"
+    )
+    try:
+        ttl = int(raw_value)
+    except (TypeError, ValueError):
+        return 300
+    return max(30, ttl)
+
+def build_download_signature(filename: str, expires_at: int, secret: str) -> str:
+    payload = f"{filename}:{expires_at}".encode("utf-8")
+    return hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+
+def _extract_download_filename_from_path(path_value: str) -> Optional[str]:
+    prefix = "/files/"
+    if not path_value.startswith(prefix):
+        return None
+    raw_filename = path_value[len(prefix):]
+    if not raw_filename:
+        return None
+
+    filename = _clean_user_path(unquote(raw_filename))
+    if not filename:
+        return None
+    if Path(filename).name != filename:
+        return None
+    if not filename.lower().endswith(".xlsx"):
+        return None
+    return filename
+
+def evaluate_signed_download_request(request: Request) -> str:
+    """
+    Validate short-lived signed file download URLs.
+
+    Returns:
+      - "valid" if request contains a valid signature
+      - "invalid" if signature params are present but invalid/expired
+      - "not_attempted" if no signature params are present
+    """
+    secret = get_download_signing_secret()
+    if not secret:
+        return "not_attempted"
+
+    exp_raw = request.query_params.get("exp")
+    sig = request.query_params.get("sig")
+    if exp_raw is None and sig is None:
+        return "not_attempted"
+
+    filename = _extract_download_filename_from_path(request.url.path)
+    if not filename:
+        return "invalid"
+
+    try:
+        expires_at = int(exp_raw or "")
+    except (TypeError, ValueError):
+        return "invalid"
+
+    if expires_at < int(time.time()):
+        return "invalid"
+
+    expected = build_download_signature(filename, expires_at, secret)
+    if not sig or not secrets.compare_digest(sig, expected):
+        return "invalid"
+
+    return "valid"
+
 def build_download_url(file_path: Path) -> Optional[str]:
     """Build download URL when a base URL is configured."""
     base_url = get_download_base_url()
     if not base_url:
         return None
 
-    return f"{base_url}/files/{quote(file_path.name)}"
+    url = f"{base_url}/files/{quote(file_path.name)}"
+    secret = get_download_signing_secret()
+    if not secret:
+        return url
+
+    expires_at = int(time.time()) + get_download_url_ttl_seconds()
+    signature = build_download_signature(file_path.name, expires_at, secret)
+    return f"{url}?exp={expires_at}&sig={signature}"
 
 def get_excel_path(filename: str, must_exist: bool = True) -> str:
     """
