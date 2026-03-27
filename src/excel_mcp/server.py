@@ -113,7 +113,7 @@ def append_finisher_hint_to_text(response_text: str) -> str:
     except (TypeError, ValueError, json.JSONDecodeError):
         if not text:
             return FINISHER_HINT_TEXT
-        return f"{text}\n\n{FINISHER_HINT_TEXT}"
+        return f"{text} {FINISHER_HINT_TEXT}"
 
     if isinstance(parsed, dict):
         message = parsed.get("message")
