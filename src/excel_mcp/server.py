@@ -7,6 +7,7 @@ import json
 import hmac
 import hashlib
 import time
+from functools import wraps
 from pathlib import Path
 from typing import Any, List, Dict, Optional
 from urllib.parse import quote, unquote
@@ -94,6 +95,49 @@ DOWNLOAD_SIGNING_SECRET_PRIMARY_ENV_VAR = "DOC_DOWNLOAD_SIGNING_SECRET"
 DOWNLOAD_SIGNING_SECRET_COMPAT_ENV_VAR = "MCP_DOWNLOAD_SIGNING_SECRET"
 DOWNLOAD_URL_TTL_PRIMARY_ENV_VAR = "DOC_DOWNLOAD_URL_TTL_SECONDS"
 DOWNLOAD_URL_TTL_COMPAT_ENV_VAR = "MCP_DOWNLOAD_URL_TTL_SECONDS"
+
+FINISHER_HINT_LINE_1 = "Finisher hint: when the user request appears complete, call"
+FINISHER_HINT_TEXT = (
+    f"{FINISHER_HINT_LINE_1} save_document_mcp_word-mcp so the user receives a download link."
+)
+
+
+def append_finisher_hint_to_text(response_text: str) -> str:
+    """Append the finisher hint to plain text or JSON tool responses."""
+    text = (response_text or "").rstrip()
+    if FINISHER_HINT_LINE_1 in text:
+        return response_text
+
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        if not text:
+            return FINISHER_HINT_TEXT
+        return f"{text}\n\n{FINISHER_HINT_TEXT}"
+
+    if isinstance(parsed, dict):
+        message = parsed.get("message")
+        if isinstance(message, str):
+            parsed["message"] = append_finisher_hint_to_text(message)
+        else:
+            parsed["finisher_hint"] = FINISHER_HINT_TEXT
+        return json.dumps(parsed, indent=2, default=str)
+
+    return f"{text}\n\n{FINISHER_HINT_TEXT}"
+
+
+def append_finisher_hint_to_tool_output(func):
+    """Wrap a tool function so every string response includes the finisher hint."""
+
+    @wraps(func)
+    def wrapper(*args: Any, **kwargs: Any):
+        response = func(*args, **kwargs)
+        if isinstance(response, str):
+            return append_finisher_hint_to_text(response)
+        return response
+
+    return wrapper
+
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
     """Simple API key middleware for HTTP transports."""
@@ -484,6 +528,7 @@ async def healthz(_: Request) -> Response:
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def apply_formula(
     filepath: str,
     sheet_name: str,
@@ -493,6 +538,9 @@ def apply_formula(
     """
     Apply Excel formula to cell.
     Excel formula will write to cell with verification.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
     """
     try:
         full_path = get_excel_path(filepath)
@@ -517,13 +565,19 @@ def apply_formula(
         readOnlyHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def validate_formula_syntax(
     filepath: str,
     sheet_name: str,
     cell: str,
     formula: str,
 ) -> str:
-    """Validate Excel formula syntax without applying it."""
+    """
+    Validate Excel formula syntax without applying it.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         result = validate_formula_impl(full_path, sheet_name, cell, formula)
@@ -540,6 +594,7 @@ def validate_formula_syntax(
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def format_range(
     filepath: str,
     sheet_name: str,
@@ -560,7 +615,12 @@ def format_range(
     protection: Optional[Dict[str, Any]] = None,
     conditional_format: Optional[Dict[str, Any]] = None
 ) -> str:
-    """Apply formatting to a range of cells."""
+    """
+    Apply formatting to a range of cells.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         from excel_mcp.formatting import format_range as format_range_func
@@ -599,6 +659,7 @@ def format_range(
         readOnlyHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def read_data_from_excel(
     filepath: str,
     sheet_name: str,
@@ -619,6 +680,9 @@ def read_data_from_excel(
     Returns:  
     JSON string containing structured cell data with validation metadata.
     Each cell includes: address, value, row, column, and validation info (if any).
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
     """
     try:
         full_path = get_excel_path(filepath)
@@ -645,11 +709,15 @@ def read_data_from_excel(
         readOnlyHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def list_excel_files(directory: str = "") -> str:
     """
     List .xlsx files in a directory.
 
     If directory is empty or ".", and an output dir is configured, lists output dir.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
     """
     try:
         files_root = get_files_root()
@@ -701,6 +769,7 @@ def list_excel_files(directory: str = "") -> str:
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def write_data_to_excel(
     filepath: str,
     sheet_name: str,
@@ -716,7 +785,9 @@ def write_data_to_excel(
     sheet_name: Name of worksheet to write to
     data: List of lists containing data to write to the worksheet, sublists are assumed to be rows
     start_cell: Cell to start writing to, default is "A1"
-  
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
     """
     try:
         full_path = get_excel_path(filepath)
@@ -734,8 +805,14 @@ def write_data_to_excel(
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def create_workbook(filepath: str) -> str:
-    """Create new Excel workbook."""
+    """
+    Create new Excel workbook.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath, must_exist=False)
         from excel_mcp.workbook import create_workbook as create_workbook_impl
@@ -762,12 +839,16 @@ def create_workbook(filepath: str) -> str:
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def save_excel_file(file_path: str, source_filename: str) -> str:
     """
     Save/copy an existing workbook to a target path.
 
     The source file is resolved using robust lookup:
     exact path, output-dir fallback, and case-insensitive basename fallback.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
     """
     try:
         source_path = resolve_existing_excel_path(source_filename)
@@ -809,8 +890,14 @@ def save_excel_file(file_path: str, source_filename: str) -> str:
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def create_worksheet(filepath: str, sheet_name: str) -> str:
-    """Create new worksheet in workbook."""
+    """
+    Create new worksheet in workbook.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         from excel_mcp.workbook import create_sheet as create_worksheet_impl
@@ -828,6 +915,7 @@ def create_worksheet(filepath: str, sheet_name: str) -> str:
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def create_chart(
     filepath: str,
     sheet_name: str,
@@ -838,7 +926,12 @@ def create_chart(
     x_axis: str = "",
     y_axis: str = ""
 ) -> str:
-    """Create chart in worksheet."""
+    """
+    Create chart in worksheet.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         result = create_chart_impl(
@@ -864,6 +957,7 @@ def create_chart(
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def create_pivot_table(
     filepath: str,
     sheet_name: str,
@@ -873,7 +967,12 @@ def create_pivot_table(
     columns: Optional[List[str]] = None,
     agg_func: str = "mean"
 ) -> str:
-    """Create pivot table in worksheet."""
+    """
+    Create pivot table in worksheet.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         result = create_pivot_table_impl(
@@ -898,6 +997,7 @@ def create_pivot_table(
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def create_table(
     filepath: str,
     sheet_name: str,
@@ -905,7 +1005,12 @@ def create_table(
     table_name: Optional[str] = None,
     table_style: str = "TableStyleMedium9"
 ) -> str:
-    """Creates a native Excel table from a specified range of data."""
+    """
+    Creates a native Excel table from a specified range of data.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         result = create_table_impl(
@@ -928,12 +1033,18 @@ def create_table(
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def copy_worksheet(
     filepath: str,
     source_sheet: str,
     target_sheet: str
 ) -> str:
-    """Copy worksheet within workbook."""
+    """
+    Copy worksheet within workbook.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         result = copy_sheet(full_path, source_sheet, target_sheet)
@@ -950,11 +1061,17 @@ def copy_worksheet(
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def delete_worksheet(
     filepath: str,
     sheet_name: str
 ) -> str:
-    """Delete worksheet from workbook."""
+    """
+    Delete worksheet from workbook.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         result = delete_sheet(full_path, sheet_name)
@@ -971,12 +1088,18 @@ def delete_worksheet(
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def rename_worksheet(
     filepath: str,
     old_name: str,
     new_name: str
 ) -> str:
-    """Rename worksheet in workbook."""
+    """
+    Rename worksheet in workbook.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         result = rename_sheet(full_path, old_name, new_name)
@@ -993,11 +1116,17 @@ def rename_worksheet(
         readOnlyHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def get_workbook_metadata(
     filepath: str,
     include_ranges: bool = False
 ) -> str:
-    """Get metadata about workbook including sheets, ranges, etc."""
+    """
+    Get metadata about workbook including sheets, ranges, etc.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         result = get_workbook_info(full_path, include_ranges=include_ranges)
@@ -1014,8 +1143,14 @@ def get_workbook_metadata(
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def merge_cells(filepath: str, sheet_name: str, start_cell: str, end_cell: str) -> str:
-    """Merge a range of cells."""
+    """
+    Merge a range of cells.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         result = merge_range(full_path, sheet_name, start_cell, end_cell)
@@ -1032,8 +1167,14 @@ def merge_cells(filepath: str, sheet_name: str, start_cell: str, end_cell: str) 
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def unmerge_cells(filepath: str, sheet_name: str, start_cell: str, end_cell: str) -> str:
-    """Unmerge a range of cells."""
+    """
+    Unmerge a range of cells.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         result = unmerge_range(full_path, sheet_name, start_cell, end_cell)
@@ -1050,8 +1191,14 @@ def unmerge_cells(filepath: str, sheet_name: str, start_cell: str, end_cell: str
         readOnlyHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def get_merged_cells(filepath: str, sheet_name: str) -> str:
-    """Get merged cells in a worksheet."""
+    """
+    Get merged cells in a worksheet.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         return str(get_merged_ranges(full_path, sheet_name))
@@ -1067,6 +1214,7 @@ def get_merged_cells(filepath: str, sheet_name: str) -> str:
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def copy_range(
     filepath: str,
     sheet_name: str,
@@ -1075,7 +1223,12 @@ def copy_range(
     target_start: str,
     target_sheet: Optional[str] = None
 ) -> str:
-    """Copy a range of cells to another location."""
+    """
+    Copy a range of cells to another location.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         from excel_mcp.sheet import copy_range_operation
@@ -1100,6 +1253,7 @@ def copy_range(
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def delete_range(
     filepath: str,
     sheet_name: str,
@@ -1107,7 +1261,12 @@ def delete_range(
     end_cell: str,
     shift_direction: str = "up"
 ) -> str:
-    """Delete a range of cells and shift remaining cells."""
+    """
+    Delete a range of cells and shift remaining cells.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         from excel_mcp.sheet import delete_range_operation
@@ -1131,13 +1290,19 @@ def delete_range(
         readOnlyHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def validate_excel_range(
     filepath: str,
     sheet_name: str,
     start_cell: str,
     end_cell: Optional[str] = None
 ) -> str:
-    """Validate if a range exists and is properly formatted."""
+    """
+    Validate if a range exists and is properly formatted.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         range_str = start_cell if not end_cell else f"{start_cell}:{end_cell}"
@@ -1155,6 +1320,7 @@ def validate_excel_range(
         readOnlyHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def get_data_validation_info(
     filepath: str,
     sheet_name: str
@@ -1171,6 +1337,9 @@ def get_data_validation_info(
         
     Returns:
         JSON string containing all validation rules in the worksheet
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
     """
     try:
         full_path = get_excel_path(filepath)
@@ -1204,13 +1373,19 @@ def get_data_validation_info(
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def insert_rows(
     filepath: str,
     sheet_name: str,
     start_row: int,
     count: int = 1
 ) -> str:
-    """Insert one or more rows starting at the specified row."""
+    """
+    Insert one or more rows starting at the specified row.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         result = insert_row(full_path, sheet_name, start_row, count)
@@ -1227,13 +1402,19 @@ def insert_rows(
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def insert_columns(
     filepath: str,
     sheet_name: str,
     start_col: int,
     count: int = 1
 ) -> str:
-    """Insert one or more columns starting at the specified column."""
+    """
+    Insert one or more columns starting at the specified column.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         result = insert_cols(full_path, sheet_name, start_col, count)
@@ -1250,13 +1431,19 @@ def insert_columns(
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def delete_sheet_rows(
     filepath: str,
     sheet_name: str,
     start_row: int,
     count: int = 1
 ) -> str:
-    """Delete one or more rows starting at the specified row."""
+    """
+    Delete one or more rows starting at the specified row.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         result = delete_rows(full_path, sheet_name, start_row, count)
@@ -1273,13 +1460,19 @@ def delete_sheet_rows(
         destructiveHint=True,
     ),
 )
+@append_finisher_hint_to_tool_output
 def delete_sheet_columns(
     filepath: str,
     sheet_name: str,
     start_col: int,
     count: int = 1
 ) -> str:
-    """Delete one or more columns starting at the specified column."""
+    """
+    Delete one or more columns starting at the specified column.
+
+    Finisher hint: when the user request appears complete, call
+        save_document_mcp_word-mcp so the user receives a download link.
+    """
     try:
         full_path = get_excel_path(filepath)
         result = delete_cols(full_path, sheet_name, start_col, count)
