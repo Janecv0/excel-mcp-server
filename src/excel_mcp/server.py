@@ -299,11 +299,32 @@ def _validate_writable_target(target_path: Path) -> None:
         raise PermissionError(f"Target directory is not writable: {parent}")
 
 def resolve_target_excel_path(target_ref: str) -> Path:
-    """Resolve target save path, using output dir when given basename only."""
+    """
+    Resolve target save path.
+
+    When an output dir is configured, coerce targets into that directory so
+    generated files remain downloadable via the /files HTTP route.
+    """
     normalized = ensure_excel_extension(target_ref)
-    target_path = Path(normalized)
-    if not target_path.is_absolute():
-        target_path = target_path.resolve()
+    requested_path = Path(normalized)
+    files_root = get_files_root()
+
+    if files_root:
+        if requested_path.is_absolute():
+            target_path = requested_path.resolve()
+        else:
+            target_path = (files_root / requested_path).resolve()
+
+        try:
+            target_path.relative_to(files_root)
+        except ValueError:
+            target_path = (files_root / requested_path.name).resolve()
+
+        # /files/{filename} serves basename-only files from files_root.
+        if target_path.parent != files_root:
+            target_path = (files_root / target_path.name).resolve()
+    else:
+        target_path = requested_path if requested_path.is_absolute() else requested_path.resolve()
 
     _validate_writable_target(target_path)
     return target_path
@@ -570,13 +591,32 @@ def build_download_url(file_path: Path) -> Optional[str]:
     if not base_url:
         return None
 
-    url = f"{base_url}/files/{quote(file_path.name)}"
+    # HTTP file downloads are served only from the configured files root.
+    files_root = get_files_root()
+    if files_root is None:
+        return None
+
+    try:
+        candidate = file_path.expanduser().resolve()
+    except Exception:
+        return None
+
+    try:
+        candidate.relative_to(files_root)
+    except ValueError:
+        return None
+
+    # Download route currently serves basename-only files from files_root.
+    if candidate.parent != files_root:
+        return None
+
+    url = f"{base_url}/files/{quote(candidate.name)}"
     secret = get_download_signing_secret()
     if not secret:
         return url
 
     expires_at = int(time.time()) + get_download_url_ttl_seconds()
-    signature = build_download_signature(file_path.name, expires_at, secret)
+    signature = build_download_signature(candidate.name, expires_at, secret)
     return f"{url}?exp={expires_at}&sig={signature}"
 
 def get_excel_path(filename: str, must_exist: bool = True) -> str:
