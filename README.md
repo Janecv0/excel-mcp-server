@@ -99,7 +99,7 @@ Optional download URL env vars used in tool responses:
 - `MCP_DOWNLOAD_BASE_URL` (fallback)
 - `DOC_DOWNLOAD_SIGNING_SECRET` (primary, enables signed clickable links)
 - `MCP_DOWNLOAD_SIGNING_SECRET` (fallback)
-- `DOC_DOWNLOAD_URL_TTL_SECONDS` (optional, default `300`)
+- `DOC_DOWNLOAD_URL_TTL_SECONDS` (optional, default `86400`)
 
 - Example (Windows PowerShell):
   ```powershell

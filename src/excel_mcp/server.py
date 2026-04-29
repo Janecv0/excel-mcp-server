@@ -354,12 +354,12 @@ def get_download_url_ttl_seconds() -> int:
         os.environ.get(DOWNLOAD_URL_TTL_PRIMARY_ENV_VAR)
         or os.environ.get(DOWNLOAD_URL_TTL_COMPAT_ENV_VAR)
         or os.environ.get("EXCEL_DOWNLOAD_URL_TTL_SECONDS")
-        or "300"
+        or "86400"
     )
     try:
         ttl = int(raw_value)
     except (TypeError, ValueError):
-        return 300
+        return 86400
     return max(30, ttl)
 
 def build_download_signature(filename: str, expires_at: int, secret: str) -> str:
@@ -685,9 +685,6 @@ async def list_generated_files(_: Request) -> Response:
                 "name": path.name,
                 "size_bytes": path.stat().st_size,
             }
-            download_url = build_download_url(path)
-            if download_url:
-                item["download_url"] = download_url
             files.append(
                 {
                     **item
@@ -955,9 +952,6 @@ def list_excel_files(directory: str = "") -> str:
                 "path": str(candidate.resolve()),
                 "size_bytes": candidate.stat().st_size,
             }
-            download_url = build_download_url(candidate)
-            if download_url:
-                item["download_url"] = download_url
             files.append(item)
 
         payload = {
@@ -1030,9 +1024,6 @@ def create_workbook(filepath: str) -> str:
             "file_path": str(created_path),
             "file_size_bytes": created_path.stat().st_size if created_path.exists() else 0,
         }
-        download_url = build_download_url(created_path)
-        if download_url:
-            response_payload["download_url"] = download_url
         return json.dumps(response_payload, indent=2)
     except WorkbookError as e:
         return f"Error: {str(e)}"
