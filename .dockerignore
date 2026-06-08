@@ -1,0 +1,10 @@
+.git
+.github
+venv
+.venv
+*.mcpb
+__pycache__
+*.pyc
+.python-version
+docs
+assets
